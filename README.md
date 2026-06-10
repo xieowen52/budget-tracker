@@ -3,7 +3,11 @@
 A personal finance web app with AI-powered transaction parsing. Describe a purchase in plain English and Claude extracts the amount, category, and date automatically.
 
 <!-- Replace with your dashboard screenshot -->
-![Dashboard](screenshot.png)
+<img width="911" height="646" alt="image" src="https://github.com/user-attachments/assets/b3fc883a-d6a7-4ecd-b346-8ffbffcd88d5" />
+<img width="917" height="761" alt="image" src="https://github.com/user-attachments/assets/a30127c0-112f-4b7c-9de4-42f2bc7af17e" />
+<img width="913" height="767" alt="image" src="https://github.com/user-attachments/assets/b6d94645-2591-454c-b196-b01c0873bacd" />
+<img width="911" height="776" alt="image" src="https://github.com/user-attachments/assets/96dedb23-2f19-428b-8664-42097bd2ad59" />
+
 
 ## Features
 
