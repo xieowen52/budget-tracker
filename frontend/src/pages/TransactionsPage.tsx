@@ -186,6 +186,7 @@ export default function TransactionsPage() {
       })
       setParsed(null)
       setNlText('')
+      setAddForm(emptyForm())
       fetchTransactions()
     } finally {
       setSaving(false)
@@ -263,7 +264,7 @@ export default function TransactionsPage() {
           <p className="text-sm text-slate-500">Add and manage your transactions</p>
         </div>
         <button
-          onClick={() => { setShowManual((v) => !v); setParsed(null) }}
+          onClick={() => { setShowManual((v) => { if (!v) setAddForm(emptyForm()); return !v }); setParsed(null) }}
           className="px-4 py-2 text-sm font-medium bg-white border border-slate-300 rounded-lg hover:bg-slate-50 shadow-sm transition-colors"
         >
           {showManual ? 'Cancel' : '+ Add manually'}
@@ -313,7 +314,7 @@ export default function TransactionsPage() {
               <button onClick={confirmParsed} disabled={saving} className="px-4 py-1.5 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-50">
                 {saving ? 'Saving…' : 'Confirm & save'}
               </button>
-              <button onClick={() => { setParsed(null); setShowManual(true) }} className="px-4 py-1.5 bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50">
+              <button onClick={() => { setShowManual(true); setParsed(null) }} className="px-4 py-1.5 bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50">
                 Edit
               </button>
               <button onClick={() => setParsed(null)} className="px-4 py-1.5 text-slate-500 text-sm hover:text-slate-700">
