@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Env — never commit secrets
+.env
+.env.*
+
+# Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
