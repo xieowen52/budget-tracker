@@ -9,6 +9,8 @@ import RegisterPage from './pages/RegisterPage'
 import DashboardPage from './pages/DashboardPage'
 import TransactionsPage from './pages/TransactionsPage'
 import BudgetsPage from './pages/BudgetsPage'
+import PlanPage from './pages/PlanPage'
+import PlanWizardPage from './pages/PlanWizardPage'
 
 function HomeRedirect() {
   const { token } = useAuth()
@@ -34,6 +36,8 @@ export default function App() {
             <Route path="dashboard" element={<DashboardPage />} />
             <Route path="transactions" element={<TransactionsPage />} />
             <Route path="budgets" element={<BudgetsPage />} />
+            <Route path="plan" element={<PlanPage />} />
+            <Route path="plan/new" element={<PlanWizardPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

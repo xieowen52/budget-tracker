@@ -13,6 +13,7 @@ class Category(str, Enum):
     shopping = "shopping"
     health = "health"
     subscriptions = "subscriptions"
+    housing = "housing"
     other = "other"
 
 

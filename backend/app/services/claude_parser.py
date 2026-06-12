@@ -11,7 +11,7 @@ from app.schemas.transaction import Category, ParsedTransaction, TransactionType
 PARSE_SYSTEM_PROMPT = """You are a financial transaction parser. The user will describe a purchase, payment, or income in natural language. Extract the transaction details and return ONLY a JSON object with these fields:
 
 - amount: positive number (no currency symbol)
-- category: one of "food", "transport", "entertainment", "shopping", "health", "subscriptions", "other"
+- category: one of "food", "transport", "entertainment", "shopping", "health", "subscriptions", "housing", "other"
 - description: short, clean description (max 60 chars)
 - date: ISO 8601 date string (YYYY-MM-DD); infer from relative phrases like "last night", "yesterday", "this morning" relative to today's date which is provided by the user
 - transaction_type: "income" or "expense"
@@ -24,6 +24,7 @@ Category guidelines:
 - shopping: clothing, electronics, Amazon, general retail
 - health: gym, pharmacy, doctor, dental
 - subscriptions: recurring software/services (Spotify, iCloud, SaaS)
+- housing: rent, utilities, electricity, water, internet, renters insurance
 - other: anything that doesn't fit
 
 Return ONLY the JSON object, no markdown fences, no explanation."""
