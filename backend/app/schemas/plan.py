@@ -92,6 +92,20 @@ class PlanSummary(BaseModel):
     unallocated: float
 
 
+class IncomeChangeCreate(BaseModel):
+    """From month_index onward, the monthly income/draw becomes
+    monthly_amount (until a later change supersedes it)."""
+
+    month_index: int = Field(ge=0)
+    monthly_amount: condecimal(gt=0, decimal_places=2)  # type: ignore[valid-type]
+
+
+class IncomeChangeResponse(BaseModel):
+    id: UUID
+    month_index: int
+    monthly_amount: float
+
+
 class PlanResponse(BaseModel):
     id: UUID
     user_id: UUID
@@ -101,8 +115,9 @@ class PlanResponse(BaseModel):
     funding_mode: FundingMode = FundingMode.income
     total_funds: float | None = None
     summary: PlanSummary
-    months: list[PlanMonthView]  # event-adjusted view, not the stored base
+    months: list[PlanMonthView]  # event- and income-adjusted view, not the stored base
     events: list[PlanEventResponse] = []
+    income_changes: list[IncomeChangeResponse] = []
 
 
 class PlanPreviewResponse(BaseModel):
@@ -141,6 +156,63 @@ class AnalysisInsights(BaseModel):
     going_well: list[str]
     needs_attention: list[str]
     suggestions: list[str]
+
+
+class PlanStatusCategory(BaseModel):
+    category: Category
+    planned: float
+    spent: float
+    remaining: float  # negative = over
+    is_fixed: bool
+
+
+class PlanStatusResponse(BaseModel):
+    """Current-month plan snapshot for the dashboard: event-adjusted
+    planned amounts vs. month-to-date spending."""
+
+    active: bool  # False when today is outside the plan period
+    month_index: int = 0
+    days_left: int = 0
+    categories: list[PlanStatusCategory] = []
+    buffer: float = 0.0  # this month's unallocated cushion
+
+
+class PlanIntakeRequest(BaseModel):
+    """Free-text description of the user's financial situation."""
+
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class IntakeEventDraft(BaseModel):
+    """An irregular event extracted during intake. Not persisted — the
+    client adds it via POST /plans/events after the plan is created."""
+
+    name: str
+    category: Category
+    amount: float
+    month_index: int
+    funding: FundingStrategy
+
+
+class PlanIntakeResponse(BaseModel):
+    """Wizard fields extracted from the user's description.
+
+    Every field is optional: only what the user actually stated is
+    filled in, and follow_up_questions lists what's still needed before
+    a plan can be generated. The client prefills the wizard with these
+    values — nothing is saved without the user reviewing it.
+    """
+
+    funding_mode: FundingMode | None = None  # None = couldn't determine
+    monthly_income: float | None = None
+    total_funds: float | None = None
+    horizon_months: int | None = None
+    savings_goal: float | None = None
+    fixed_expenses: dict[Category, float] = {}
+    variable_estimates: dict[Category, float] = {}
+    events: list[IntakeEventDraft] = []
+    follow_up_questions: list[str] = []
+    confidence_note: str | None = None
 
 
 class PlanAnalysisResponse(BaseModel):

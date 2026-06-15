@@ -6,7 +6,7 @@ import {
 import { useNavigate } from 'react-router-dom'
 import api from '../api/client'
 import {
-  type Transaction, CATEGORY_COLORS, CATEGORY_LABELS, CATEGORY_ICONS,
+  type Transaction, type PlanStatus, CATEGORY_COLORS, CATEGORY_LABELS, CATEGORY_ICONS,
   type Category, CATEGORIES,
 } from '../types'
 
@@ -142,6 +142,8 @@ export default function DashboardPage() {
   const [chartType, setChartType] = useState<ChartType>('bar')
   const [quickAdd, setQuickAdd] = useState<'expense' | 'income' | null>(null)
 
+  const [planStatus, setPlanStatus] = useState<PlanStatus | null>(null)
+
   function fetchMonthly() {
     setLoading(true)
     api.get<Transaction[]>('/transactions/', { params: { year, month } })
@@ -149,10 +151,24 @@ export default function DashboardPage() {
       .finally(() => setLoading(false))
   }
 
+  function fetchPlanStatus() {
+    api.get<PlanStatus>('/plans/status')
+      .then((r) => setPlanStatus(r.data))
+      .catch(() => setPlanStatus(null)) // 404 = no plan; card just hides
+  }
+
   useEffect(() => { fetchMonthly() }, [year, month])
 
   useEffect(() => {
-    api.get<Transaction[]>('/transactions/').then((r) => setAllTransactions(r.data))
+    // Catch up due recurring transactions first so this month's rent /
+    // subscriptions are included in everything below
+    api.post('/recurring/post-due')
+      .catch(() => {})
+      .finally(() => {
+        fetchMonthly()
+        api.get<Transaction[]>('/transactions/').then((r) => setAllTransactions(r.data))
+        fetchPlanStatus()
+      })
   }, [])
 
   function prevMonth() {
@@ -279,6 +295,56 @@ export default function DashboardPage() {
           </button>
         </div>
       </div>
+
+      {/* Plan check — how this month tracks against the budget plan */}
+      {isCurrentMonth && planStatus?.active && (() => {
+        const flexible = planStatus.categories.filter((c) => !c.is_fixed)
+        const over = flexible.filter((c) => c.remaining < 0)
+        const headline =
+          over.length > 0
+            ? `⚠️ ${over.map((c) => `${CATEGORY_LABELS[c.category]} ${fmt(-c.remaining)} over`).join(' · ')}`
+            : `✅ On budget so far`
+        return (
+          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-700">Plan check</h3>
+                <p className={`text-xs mt-0.5 ${over.length > 0 ? 'text-red-600 font-medium' : 'text-green-600'}`}>
+                  {headline} — {planStatus.days_left} day{planStatus.days_left === 1 ? '' : 's'} left this month
+                </p>
+              </div>
+              <button onClick={() => navigate('/plan')} className="text-xs text-indigo-600 hover:underline flex-shrink-0">
+                View plan →
+              </button>
+            </div>
+            <div className="space-y-2">
+              {flexible.map((c) => {
+                const pct = c.planned > 0 ? Math.min((c.spent / c.planned) * 100, 100) : 0
+                return (
+                  <div key={c.category} className="flex items-center gap-3">
+                    <span className="text-base w-5 flex-shrink-0">{CATEGORY_ICONS[c.category]}</span>
+                    <span className="text-xs text-slate-600 w-24 flex-shrink-0">{CATEGORY_LABELS[c.category]}</span>
+                    <div className="flex-1 bg-slate-100 rounded-full h-1.5 min-w-0">
+                      <div
+                        className={`h-1.5 rounded-full transition-all ${c.remaining < 0 ? 'bg-red-500' : pct > 75 ? 'bg-amber-400' : 'bg-indigo-500'}`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <span className={`text-xs w-28 text-right flex-shrink-0 ${c.remaining < 0 ? 'text-red-600 font-semibold' : 'text-slate-500'}`}>
+                      {c.remaining < 0 ? `${fmt(-c.remaining)} over` : `${fmt(c.remaining)} left`}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+            {planStatus.buffer > 0 && (
+              <p className="text-xs text-slate-400 mt-3">
+                💡 Plus a {fmt(planStatus.buffer)} unassigned buffer this month.
+              </p>
+            )}
+          </div>
+        )
+      })()}
 
       {/* Spending chart */}
       {byCategory.length > 0 ? (

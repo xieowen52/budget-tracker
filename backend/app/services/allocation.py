@@ -166,6 +166,69 @@ def compute_allocation(
     )
 
 
+def apply_income_changes(
+    amounts: dict[int, dict[Category, Decimal]],
+    fixed: dict[int, set[Category]],
+    buffers: dict[int, Decimal],
+    base_income: Decimal,
+    monthly_savings: Decimal,
+    changes: dict[int, Decimal],
+) -> tuple[dict[int, dict[Category, Decimal]], dict[int, Decimal]]:
+    """Rescale months whose income differs from the plan's base income.
+
+    `changes` maps month_index -> new monthly amount, applying from that
+    month until the next change or the plan's end. Fixed lines and the
+    savings set-aside stay untouched; the flexible lines and buffer are
+    scaled proportionally to the new discretionary amount, so the user's
+    relative priorities (food vs. fun) survive the change.
+
+    Applied BEFORE events, so an event's feasibility is judged against
+    the income actually available in its months.
+
+    Raises AllocationError when a month's new income can't cover its
+    fixed costs plus savings.
+    """
+    amounts = {i: dict(cats) for i, cats in amounts.items()}
+    buffers = dict(buffers)
+
+    effective = base_income
+    for i in sorted(amounts):
+        effective = changes.get(i, effective)
+        if effective == base_income:
+            continue
+
+        fixed_total = sum(
+            (amt for cat, amt in amounts[i].items() if cat in fixed[i]),
+            Decimal("0"),
+        )
+        flexible = {
+            cat: amt for cat, amt in amounts[i].items()
+            if cat not in fixed[i] and amt > 0
+        }
+        base_disc = base_income - fixed_total - monthly_savings
+        new_disc = effective - fixed_total - monthly_savings
+        if new_disc < 0:
+            shortfall = _to_cents(-new_disc)
+            raise AllocationError(
+                f"From month {i + 1}, income of {effective} can't cover fixed "
+                f"costs ({fixed_total}) plus savings ({monthly_savings}) — "
+                f"short by {shortfall}. Lower the savings goal or adjust "
+                f"fixed costs first."
+            )
+
+        flexible_total = sum(flexible.values(), Decimal("0"))
+        if base_disc > 0 and flexible_total > 0:
+            new_flexible_total = _to_cents(flexible_total * new_disc / base_disc)
+            scaled = _split_by_weights(min(new_flexible_total, new_disc), flexible)
+            amounts[i].update(scaled)
+            buffers[i] = new_disc - sum(scaled.values(), Decimal("0"))
+        else:
+            # Nothing flexible to scale — the whole change lands on the buffer
+            buffers[i] = _to_cents(new_disc)
+
+    return amounts, buffers
+
+
 @dataclass(frozen=True)
 class IrregularEvent:
     """A one-time planned expense attached to one plan month."""

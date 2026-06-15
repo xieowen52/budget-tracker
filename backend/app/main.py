@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.routers import auth, budgets, parse, plans, transactions
+from app.routers import auth, budgets, parse, plans, recurring, transactions
 
 app = FastAPI(
     title="Budget Tracker API",
@@ -23,6 +23,7 @@ app.include_router(transactions.router)
 app.include_router(parse.router)
 app.include_router(budgets.router)
 app.include_router(plans.router)
+app.include_router(recurring.router)
 
 
 @app.get("/health", tags=["health"])

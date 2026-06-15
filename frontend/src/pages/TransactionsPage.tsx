@@ -1,8 +1,14 @@
 import { type FormEvent, useEffect, useState } from 'react'
 import api from '../api/client'
 import {
-  type Transaction, type ParsedTransaction, CATEGORIES, CATEGORY_LABELS, CATEGORY_ICONS,
+  type Transaction, type ParsedTransaction, type RecurringTransaction,
+  CATEGORIES, CATEGORY_LABELS, CATEGORY_ICONS,
 } from '../types'
+
+function ordinal(n: number) {
+  const suffix = n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd' : n % 10 === 3 && n !== 13 ? 'rd' : 'th'
+  return `${n}${suffix}`
+}
 
 function fmt(n: number) {
   return n.toLocaleString('en-US', { style: 'currency', currency: 'USD' })
@@ -141,6 +147,15 @@ export default function TransactionsPage() {
   const [editForm, setEditForm] = useState<TxForm>(emptyForm())
   const [editSaving, setEditSaving] = useState(false)
 
+  // Recurring templates
+  const [recurring, setRecurring] = useState<RecurringTransaction[]>([])
+  const [showRecurringForm, setShowRecurringForm] = useState(false)
+  const [recForm, setRecForm] = useState({
+    amount: '', category: 'housing', description: '', transaction_type: 'expense' as TxType, day_of_month: 1,
+  })
+  const [recSaving, setRecSaving] = useState(false)
+  const [postedNote, setPostedNote] = useState('')
+
   function fetchTransactions() {
     api.get<Transaction[]>('/transactions/').then((r) => {
       setTransactions(r.data)
@@ -148,7 +163,51 @@ export default function TransactionsPage() {
     })
   }
 
-  useEffect(() => { fetchTransactions() }, [])
+  function fetchRecurring() {
+    api.get<RecurringTransaction[]>('/recurring/').then((r) => setRecurring(r.data))
+  }
+
+  useEffect(() => {
+    // Catch up any due recurring transactions before loading the list,
+    // so rent/subscriptions that came due since the last visit appear
+    api.post<{ posted: Transaction[] }>('/recurring/post-due')
+      .then((r) => {
+        if (r.data.posted.length > 0) {
+          setPostedNote(`🔄 Posted ${r.data.posted.length} recurring transaction${r.data.posted.length > 1 ? 's' : ''} that came due.`)
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        fetchTransactions()
+        fetchRecurring()
+      })
+  }, [])
+
+  async function addRecurring(e: FormEvent) {
+    e.preventDefault()
+    setRecSaving(true)
+    try {
+      await api.post('/recurring/', {
+        ...recForm,
+        amount: parseFloat(recForm.amount),
+        category: recForm.transaction_type === 'income' ? 'other' : recForm.category,
+      })
+      setRecForm({ amount: '', category: 'housing', description: '', transaction_type: 'expense', day_of_month: 1 })
+      setShowRecurringForm(false)
+      // The first occurrence may be due immediately
+      await api.post('/recurring/post-due').catch(() => {})
+      fetchRecurring()
+      fetchTransactions()
+    } finally {
+      setRecSaving(false)
+    }
+  }
+
+  async function deleteRecurring(r: RecurringTransaction) {
+    if (!confirm(`Stop the recurring "${r.description || CATEGORY_LABELS[r.category]}"? Already-posted transactions are kept.`)) return
+    await api.delete(`/recurring/${r.id}`)
+    fetchRecurring()
+  }
 
   async function handleParse(e: FormEvent) {
     e.preventDefault()
@@ -336,6 +395,137 @@ export default function TransactionsPage() {
           />
         </div>
       )}
+
+      {/* Recurring transactions */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-700">Recurring monthly</h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Rent, paychecks, subscriptions — posted automatically each month
+            </p>
+          </div>
+          <button
+            onClick={() => setShowRecurringForm((v) => !v)}
+            className="px-3 py-1.5 text-xs font-medium bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+          >
+            {showRecurringForm ? 'Cancel' : '+ Add recurring'}
+          </button>
+        </div>
+
+        {postedNote && (
+          <p className="px-6 py-2 text-xs text-indigo-600 bg-indigo-50/60 border-b border-indigo-100">{postedNote}</p>
+        )}
+
+        {showRecurringForm && (
+          <form onSubmit={addRecurring} className="px-6 py-4 border-b border-slate-100 flex flex-wrap gap-3 items-end">
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Amount ($)</label>
+              <input
+                type="number" step="0.01" min="0.01" required
+                value={recForm.amount}
+                onChange={(e) => setRecForm({ ...recForm, amount: e.target.value })}
+                className="w-28 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                placeholder="e.g. 800"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Type</label>
+              <select
+                value={recForm.transaction_type}
+                onChange={(e) => setRecForm({ ...recForm, transaction_type: e.target.value as TxType })}
+                className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="expense">Expense</option>
+                <option value="income">Income</option>
+              </select>
+            </div>
+            {recForm.transaction_type === 'expense' && (
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Category</label>
+                <select
+                  value={recForm.category}
+                  onChange={(e) => setRecForm({ ...recForm, category: e.target.value })}
+                  className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  {CATEGORIES.map((c) => (
+                    <option key={c} value={c}>{CATEGORY_ICONS[c]} {CATEGORY_LABELS[c]}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Day of month</label>
+              <select
+                value={recForm.day_of_month}
+                onChange={(e) => setRecForm({ ...recForm, day_of_month: parseInt(e.target.value) })}
+                className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+                  <option key={d} value={d}>{ordinal(d)}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex-1 min-w-[140px]">
+              <label className="block text-xs font-medium text-slate-600 mb-1">Description</label>
+              <input
+                type="text"
+                value={recForm.description}
+                onChange={(e) => setRecForm({ ...recForm, description: e.target.value })}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                placeholder={recForm.transaction_type === 'income' ? 'e.g. Paycheck' : 'e.g. Rent'}
+              />
+            </div>
+            <button
+              type="submit" disabled={recSaving}
+              className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {recSaving ? 'Saving…' : 'Save'}
+            </button>
+          </form>
+        )}
+
+        {recurring.length === 0 ? (
+          <p className="px-6 py-5 text-sm text-slate-400">
+            Nothing recurring yet. Add rent or a subscription and it'll log itself every month.
+          </p>
+        ) : (
+          <ul className="divide-y divide-slate-100">
+            {recurring.map((r) => (
+              <li key={r.id} className="px-6 py-3 flex items-center justify-between group">
+                <div className="flex items-center gap-3">
+                  <span
+                    className="w-8 h-8 rounded-lg flex items-center justify-center text-base flex-shrink-0"
+                    style={{ background: r.transaction_type === 'income' ? '#dcfce7' : '#f1f5f9' }}
+                  >
+                    {r.transaction_type === 'income' ? '💵' : CATEGORY_ICONS[r.category]}
+                  </span>
+                  <div>
+                    <p className="text-sm font-medium text-slate-800">
+                      {r.description || <span className="text-slate-400 italic">No description</span>}
+                    </p>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      {r.transaction_type === 'income' ? 'Income' : CATEGORY_LABELS[r.category]} · the {ordinal(r.day_of_month)} of every month · next {r.next_date}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-sm font-semibold ${r.transaction_type === 'income' ? 'text-green-600' : 'text-slate-800'}`}>
+                    {r.transaction_type === 'income' ? '+' : '-'}{fmt(r.amount)}/mo
+                  </span>
+                  <button
+                    onClick={() => deleteRecurring(r)}
+                    aria-label="Stop recurring transaction"
+                    className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-red-400 transition-all"
+                  >
+                    ×
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
 
       {/* Transaction list */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm">

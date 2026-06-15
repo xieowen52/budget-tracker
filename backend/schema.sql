@@ -66,6 +66,30 @@ create table if not exists budgets (
 );
 
 -- ============================================================
+-- RECURRING TRANSACTIONS
+-- Templates that auto-post a transaction monthly (rent, paycheck,
+-- subscriptions). There is no scheduler on free-tier hosting, so
+-- posting is catch-up-on-activity: the client calls
+-- POST /recurring/post-due when the app loads, and the backend posts
+-- everything with next_date <= today (looping if months were missed),
+-- then advances next_date. day_of_month is capped at 28 so every
+-- month has the date.
+-- ============================================================
+create table if not exists recurring_transactions (
+    id               uuid primary key default gen_random_uuid(),
+    user_id          uuid not null references users(id) on delete cascade,
+    amount           numeric(12, 2) not null check (amount > 0),
+    category         transaction_category not null,
+    description      text not null,
+    transaction_type transaction_type not null,
+    day_of_month     int not null check (day_of_month between 1 and 28),
+    next_date        date not null,
+    created_at       timestamptz not null default now()
+);
+
+create index if not exists recurring_user on recurring_transactions(user_id);
+
+-- ============================================================
 -- PLANS
 -- A multi-month budget plan generated from the onboarding wizard.
 -- One plan per user for now (unique index); creating a new plan
@@ -144,17 +168,36 @@ create table if not exists plan_events (
 create index if not exists plan_events_plan on plan_events(plan_id);
 
 -- ============================================================
+-- PLAN INCOME CHANGES
+-- "From month N onward, the monthly income/draw is X." Like events,
+-- these never modify plan_allocations — the API rescales each
+-- affected month's flexible lines and buffer on read, proportionally
+-- to the new discretionary amount. One change per month; a later
+-- change supersedes an earlier one from its month onward.
+-- ============================================================
+create table if not exists plan_income_changes (
+    id             uuid primary key default gen_random_uuid(),
+    plan_id        uuid not null references plans(id) on delete cascade,
+    month_index    int not null check (month_index >= 0),
+    monthly_amount numeric(12, 2) not null check (monthly_amount > 0),
+    created_at     timestamptz not null default now(),
+    constraint plan_income_changes_unique unique (plan_id, month_index)
+);
+
+-- ============================================================
 -- ROW LEVEL SECURITY
 -- We use the service-role key in FastAPI (bypasses RLS), so
 -- these policies are defense-in-depth in case the anon key is
 -- ever accidentally used or exposed.
 -- ============================================================
-alter table users            enable row level security;
-alter table transactions     enable row level security;
-alter table budgets          enable row level security;
-alter table plans            enable row level security;
-alter table plan_allocations enable row level security;
-alter table plan_events      enable row level security;
+alter table users                  enable row level security;
+alter table transactions           enable row level security;
+alter table budgets                enable row level security;
+alter table plans                  enable row level security;
+alter table plan_allocations       enable row level security;
+alter table plan_events            enable row level security;
+alter table recurring_transactions enable row level security;
+alter table plan_income_changes    enable row level security;
 
 -- Block all access via the anon/authenticated roles (we manage auth ourselves)
 create policy "deny_all_users"            on users            as restrictive for all using (false);
@@ -163,3 +206,5 @@ create policy "deny_all_budgets"          on budgets          as restrictive for
 create policy "deny_all_plans"            on plans            as restrictive for all using (false);
 create policy "deny_all_plan_allocations" on plan_allocations as restrictive for all using (false);
 create policy "deny_all_plan_events"      on plan_events      as restrictive for all using (false);
+create policy "deny_all_recurring"        on recurring_transactions as restrictive for all using (false);
+create policy "deny_all_income_changes"   on plan_income_changes    as restrictive for all using (false);

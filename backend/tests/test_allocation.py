@@ -196,3 +196,49 @@ def test_apply_events_does_not_mutate_base():
     apply_events(amounts, fixed, buffers, [event])
     assert amounts[0][Category.food] == D("400.00")
     assert buffers[0] == D("100.00")
+
+
+# ---------- apply_income_changes ----------
+
+from app.services.allocation import apply_income_changes
+
+
+def test_income_change_scales_flexible_and_buffer():
+    """A raise from month 1 scales flexible lines proportionally and
+    grows the buffer; fixed lines and earlier months are untouched."""
+    amounts, fixed, buffers = base_months()
+    # base income 1800: 800 fixed + 100 savings + 600 flexible + 300 buffer
+    adj, bufs = apply_income_changes(
+        amounts, fixed, buffers={i: D("300.00") for i in range(3)},
+        base_income=D("1800"), monthly_savings=D("100"),
+        changes={1: D("2700")},  # +900 from month 1 onward
+    )
+    assert adj[0][Category.food] == D("400.00")  # untouched
+    # month 1: new disc = 2700-800-100 = 1800, base disc = 900 -> x2
+    assert adj[1][Category.food] == D("800.00")
+    assert adj[1][Category.transport] == D("400.00")
+    assert adj[1][Category.housing] == D("800.00")  # fixed untouched
+    assert bufs[1] == D("600.00")
+    # change persists to month 2
+    assert adj[2][Category.food] == D("800.00")
+
+
+def test_income_drop_below_fixed_rejected():
+    amounts, fixed, buffers = base_months()
+    with pytest.raises(AllocationError, match="can't cover fixed"):
+        apply_income_changes(
+            amounts, fixed, buffers={i: D("300.00") for i in range(3)},
+            base_income=D("1800"), monthly_savings=D("100"),
+            changes={2: D("700")},  # below 800 rent + 100 savings
+        )
+
+
+def test_later_change_supersedes_earlier():
+    amounts, fixed, buffers = base_months()
+    adj, _ = apply_income_changes(
+        amounts, fixed, buffers={i: D("300.00") for i in range(3)},
+        base_income=D("1800"), monthly_savings=D("100"),
+        changes={1: D("2700"), 2: D("1800")},  # back to base in month 2
+    )
+    assert adj[1][Category.food] == D("800.00")
+    assert adj[2][Category.food] == D("400.00")

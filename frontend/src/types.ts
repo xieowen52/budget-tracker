@@ -129,6 +129,7 @@ export interface Plan {
   summary: PlanSummary
   months: PlanMonthView[]
   events: PlanEvent[]
+  income_changes: IncomeChange[]
 }
 
 export interface PlanPreview {
@@ -145,6 +146,60 @@ export interface PlanCreatePayload {
   savings_goal: number
   fixed_expenses: Partial<Record<Category, number>>
   variable_estimates: Partial<Record<Category, number>>
+}
+
+export interface RecurringTransaction {
+  id: string
+  user_id: string
+  amount: number
+  category: Category
+  description: string
+  transaction_type: TransactionType
+  day_of_month: number
+  next_date: string
+}
+
+export interface IncomeChange {
+  id: string
+  month_index: number
+  monthly_amount: number
+}
+
+export interface PlanStatusCategory {
+  category: Category
+  planned: number
+  spent: number
+  remaining: number
+  is_fixed: boolean
+}
+
+export interface PlanStatus {
+  active: boolean
+  month_index: number
+  days_left: number
+  categories: PlanStatusCategory[]
+  buffer: number
+}
+
+export interface IntakeEvent {
+  name: string
+  category: Category
+  amount: number
+  month_index: number
+  funding: FundingStrategy
+}
+
+export interface PlanIntake {
+  funding_mode: FundingMode | null
+  monthly_income: number | null
+  total_funds: number | null
+  horizon_months: number | null
+  savings_goal: number | null
+  fixed_expenses: Partial<Record<Category, number>>
+  variable_estimates: Partial<Record<Category, number>>
+  events: IntakeEvent[]
+  follow_up_questions: string[]
+  confidence_note: string | null
 }
 
 export interface MonthCategoryActual {

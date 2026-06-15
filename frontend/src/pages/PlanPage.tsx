@@ -24,6 +24,12 @@ export default function PlanPage() {
   const [analysisLoading, setAnalysisLoading] = useState(false)
   const [selectedMonth, setSelectedMonth] = useState(0)
 
+  // Add income-change form
+  const [icAmount, setIcAmount] = useState('')
+  const [icMonth, setIcMonth] = useState(0)
+  const [icError, setIcError] = useState('')
+  const [icSaving, setIcSaving] = useState(false)
+
   // Add-event form
   const [evName, setEvName] = useState('')
   const [evAmount, setEvAmount] = useState('')
@@ -86,6 +92,37 @@ export default function PlanPage() {
       setEvError(err.response?.data?.detail ?? 'Could not add the event')
     } finally {
       setEvSaving(false)
+    }
+  }
+
+  async function addIncomeChange(e: FormEvent) {
+    e.preventDefault()
+    setIcSaving(true)
+    setIcError('')
+    try {
+      const res = await api.post<Plan>('/plans/income-changes', {
+        month_index: icMonth,
+        monthly_amount: parseFloat(icAmount),
+      })
+      setPlan(res.data)
+      setIcAmount('')
+      fetchAnalysis()
+    } catch (err: any) {
+      setIcError(err.response?.data?.detail ?? 'Could not add the income change')
+    } finally {
+      setIcSaving(false)
+    }
+  }
+
+  async function deleteIncomeChange(id: string) {
+    if (!confirm('Remove this income change? Affected months go back to the regular amount.')) return
+    try {
+      await api.delete(`/plans/income-changes/${id}`)
+      const res = await api.get<Plan>('/plans/current')
+      setPlan(res.data)
+      fetchAnalysis()
+    } catch (err: any) {
+      alert(err.response?.data?.detail ?? 'Could not remove the income change')
     }
   }
 
@@ -351,6 +388,84 @@ export default function PlanPage() {
             </button>
           </div>
           {evError && <p className="text-sm text-red-600">{evError}</p>}
+        </form>
+      </div>
+
+      {/* Income changes */}
+      <div className="bg-white rounded-xl border border-slate-200">
+        <div className="px-6 py-4 border-b border-slate-100">
+          <p className="text-sm font-semibold text-slate-700">
+            {isPot ? 'Funding changes' : 'Income changes'}
+          </p>
+          <p className="text-xs text-slate-400 mt-0.5">
+            {isPot
+              ? 'Got money coming in partway through? Set a new monthly amount from that month on.'
+              : 'Starting a job, a raise, a drop in hours? Set your new monthly income from that month on.'}
+          </p>
+        </div>
+
+        {plan.income_changes.length > 0 && (
+          <div className="divide-y divide-slate-100">
+            {plan.income_changes.map((ic) => {
+              const d = plan.months[ic.month_index]
+              return (
+                <div key={ic.id} className="flex items-center justify-between px-6 py-3">
+                  <div>
+                    <span className="text-sm font-medium text-slate-800">
+                      {fmt(ic.monthly_amount)}/mo
+                    </span>
+                    <p className="text-xs text-slate-400">
+                      from {MONTHS[d.month - 1]} {d.year} onward
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => deleteIncomeChange(ic.id)}
+                    className="text-slate-300 hover:text-red-400 transition-colors text-lg leading-none"
+                    title="Remove income change"
+                  >
+                    ×
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        <form onSubmit={addIncomeChange} className="px-6 py-4 border-t border-slate-100 flex flex-wrap gap-3 items-end">
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">
+              New monthly {isPot ? 'amount' : 'income'} ($)
+            </label>
+            <input
+              type="number" step="0.01" min="0.01" required
+              value={icAmount}
+              onChange={(e) => setIcAmount(e.target.value)}
+              placeholder="e.g. 2500"
+              className="w-32 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Starting</label>
+            <select
+              value={icMonth}
+              onChange={(e) => setIcMonth(parseInt(e.target.value))}
+              className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              {plan.months.map((m) => (
+                <option key={m.month_index} value={m.month_index}>
+                  {MONTHS[m.month - 1]} {m.year}
+                </option>
+              ))}
+            </select>
+          </div>
+          <button
+            type="submit"
+            disabled={icSaving}
+            className="ml-auto px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+          >
+            {icSaving ? 'Adding…' : 'Add change'}
+          </button>
+          {icError && <p className="w-full text-sm text-red-600">{icError}</p>}
         </form>
       </div>
 

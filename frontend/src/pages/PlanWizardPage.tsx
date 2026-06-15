@@ -6,9 +6,20 @@ import {
   CATEGORY_LABELS,
   type Category,
   type FundingMode,
+  type IntakeEvent,
   type PlanCreatePayload,
+  type PlanIntake,
   type PlanPreview,
 } from '../types'
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** Name of the calendar month at `index` months after the plan start
+ *  (plans always start on the 1st of the current month). */
+function monthName(index: number) {
+  const d = new Date()
+  return MONTHS[(d.getMonth() + index) % 12]
+}
 
 function fmt(n: number) {
   return n.toLocaleString('en-US', { style: 'currency', currency: 'USD' })
@@ -45,6 +56,15 @@ export default function PlanWizardPage() {
 
   const [preview, setPreview] = useState<PlanPreview | null>(null)
   const [loading, setLoading] = useState(false)
+
+  // Conversational intake: describe your situation, Claude extracts the
+  // wizard fields, and you land on the review step to confirm/edit.
+  const [view, setView] = useState<'intake' | 'steps'>('intake')
+  const [intakeText, setIntakeText] = useState('')
+  const [intakeLoading, setIntakeLoading] = useState(false)
+  const [intakeQuestions, setIntakeQuestions] = useState<string[]>([])
+  const [intakeNote, setIntakeNote] = useState('')
+  const [pendingEvents, setPendingEvents] = useState<IntakeEvent[]>([])
 
   // Errors describe the inputs at the moment they were submitted; once
   // the user navigates to change something, the message is stale.
@@ -89,11 +109,80 @@ export default function PlanWizardPage() {
     }
   }
 
+  async function runIntake() {
+    setIntakeLoading(true)
+    setError('')
+    try {
+      const res = await api.post<PlanIntake>('/plans/intake', { text: intakeText })
+      const r = res.data
+
+      // Prefill the wizard so every step is editable afterwards
+      if (r.funding_mode) setFundingMode(r.funding_mode)
+      if (r.monthly_income) setIncome(String(r.monthly_income))
+      if (r.total_funds) setTotalFunds(String(r.total_funds))
+      if (r.horizon_months) setHorizon(r.horizon_months)
+      if (r.savings_goal) setSavingsGoal(String(r.savings_goal))
+      setFixed(Object.fromEntries(Object.entries(r.fixed_expenses).map(([c, v]) => [c, String(v)])))
+      setVariable(Object.fromEntries(Object.entries(r.variable_estimates).map(([c, v]) => [c, String(v)])))
+      setPendingEvents(r.events)
+      setIntakeNote(r.confidence_note ?? '')
+
+      const hasFunding =
+        (r.funding_mode === 'income' && r.monthly_income) ||
+        (r.funding_mode === 'pot' && r.total_funds)
+
+      if (!hasFunding || r.follow_up_questions.length > 0) {
+        // Essentials missing — show the questions and let the user add detail
+        setIntakeQuestions(
+          r.follow_up_questions.length > 0
+            ? r.follow_up_questions
+            : ['How is this period funded — monthly income, or a fixed amount of savings? Roughly how much?']
+        )
+        return
+      }
+
+      // Build the payload from the extraction directly (state updates
+      // above land asynchronously) and jump straight to review
+      const payload: PlanCreatePayload = {
+        funding_mode: r.funding_mode!,
+        ...(r.funding_mode === 'income'
+          ? { monthly_income: r.monthly_income! }
+          : { total_funds: r.total_funds! }),
+        start_date: buildPayload().start_date,
+        horizon_months: r.horizon_months ?? 6,
+        savings_goal: r.savings_goal ?? 0,
+        fixed_expenses: r.fixed_expenses,
+        variable_estimates: r.variable_estimates,
+      }
+      const previewRes = await api.post<PlanPreview>('/plans/preview', payload)
+      setPreview(previewRes.data)
+      setView('steps')
+      setStep(4)
+    } catch (err: any) {
+      setError(err.response?.data?.detail ?? 'Could not understand the description — try adding more detail')
+    } finally {
+      setIntakeLoading(false)
+    }
+  }
+
   async function createPlan() {
     setLoading(true)
     setError('')
     try {
       await api.post('/plans/', buildPayload())
+      // Add any events extracted during intake; a failing event (e.g.
+      // doesn't fit the budget) shouldn't block the plan itself
+      const failed: string[] = []
+      for (const ev of pendingEvents) {
+        try {
+          await api.post('/plans/events', ev)
+        } catch {
+          failed.push(ev.name)
+        }
+      }
+      if (failed.length > 0) {
+        alert(`Plan created, but these events didn't fit the budget and were skipped: ${failed.join(', ')}. You can add them from the plan page.`)
+      }
       navigate('/plan')
     } catch (err: any) {
       setError(err.response?.data?.detail ?? 'Could not create the plan')
@@ -133,6 +222,50 @@ export default function PlanWizardPage() {
         </p>
       </div>
 
+      {view === 'intake' ? (
+        <div className="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+          <div>
+            <h3 className="font-semibold text-slate-800">✨ Describe your situation</h3>
+            <p className="text-sm text-slate-500 mt-1">
+              Tell us about your money in plain English — income or savings, rent,
+              subscriptions, goals, trips you're planning — and we'll fill in the
+              plan for you. You'll review everything before it's saved.
+            </p>
+          </div>
+          {intakeQuestions.length > 0 && (
+            <div className="bg-indigo-50 border border-indigo-100 rounded-lg px-4 py-3 space-y-1">
+              <p className="text-xs font-semibold text-indigo-700">A couple more things:</p>
+              {intakeQuestions.map((q, i) => (
+                <p key={i} className="text-sm text-indigo-700">• {q}</p>
+              ))}
+            </div>
+          )}
+          <textarea
+            value={intakeText}
+            onChange={(e) => setIntakeText(e.target.value)}
+            rows={5}
+            placeholder={`e.g. "I'm a student with about $10k saved, no income until May. Rent is $800, I pay ~$15/month for subscriptions. I want at least $2k left at the end, and I'm going to Japan in March, probably $1,500."`}
+            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+          {error && <p className="text-sm text-red-600">{error}</p>}
+          <div className="flex items-center justify-between">
+            <button
+              onClick={() => { setError(''); setView('steps') }}
+              className="text-sm font-medium text-slate-500 hover:text-slate-700 transition-colors"
+            >
+              Skip — fill it in manually
+            </button>
+            <button
+              onClick={runIntake}
+              disabled={intakeLoading || intakeText.trim().length < 10}
+              className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+            >
+              {intakeLoading ? 'Reading…' : intakeQuestions.length > 0 ? 'Update my plan →' : 'Build my plan →'}
+            </button>
+          </div>
+        </div>
+      ) : (
+      <>
       {/* Step indicator */}
       <div className="flex items-center gap-2">
         {STEPS.map((label, i) => (
@@ -221,6 +354,9 @@ export default function PlanWizardPage() {
                 onChange={(e) => setHorizon(parseInt(e.target.value))}
                 className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
               >
+                {![3, 6, 12].includes(horizon) && (
+                  <option value={horizon}>{horizon} months</option>
+                )}
                 <option value={3}>3 months</option>
                 <option value={6}>6 months (recommended)</option>
                 <option value={12}>12 months</option>
@@ -358,6 +494,20 @@ export default function PlanWizardPage() {
                 built-in buffer for surprises (or extra savings).
               </p>
             )}
+            {pendingEvents.length > 0 && (
+              <div className="border border-slate-200 rounded-lg px-4 py-3 space-y-1">
+                <p className="text-xs font-semibold text-slate-600">One-time events to add:</p>
+                {pendingEvents.map((ev, i) => (
+                  <p key={i} className="text-sm text-slate-600">
+                    {CATEGORY_ICONS[ev.category]} {ev.name} — {fmt(ev.amount)} in {monthName(ev.month_index)}
+                    {ev.funding === 'spread' ? ' (saving up for it)' : ' (absorbed that month)'}
+                  </p>
+                ))}
+              </div>
+            )}
+            {intakeNote && (
+              <p className="text-xs text-slate-400">🤖 {intakeNote}</p>
+            )}
           </>
         )}
 
@@ -401,6 +551,8 @@ export default function PlanWizardPage() {
           )}
         </div>
       </div>
+      </>
+      )}
     </div>
   )
 }

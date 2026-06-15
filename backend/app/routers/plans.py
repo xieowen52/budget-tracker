@@ -10,15 +10,21 @@ from app.core.dependencies import get_current_user_id
 from app.schemas.plan import (
     AllocationItem,
     FundingMode,
+    IncomeChangeCreate,
+    IncomeChangeResponse,
     MonthAnalysis,
     MonthCategoryActual,
     PlanAnalysisResponse,
     PlanCreate,
     PlanEventCreate,
     PlanEventResponse,
+    PlanIntakeRequest,
+    PlanIntakeResponse,
     PlanMonthView,
     PlanPreviewResponse,
     PlanResponse,
+    PlanStatusCategory,
+    PlanStatusResponse,
     PlanSummary,
 )
 from app.schemas.transaction import Category
@@ -27,9 +33,11 @@ from app.services.allocation import (
     AllocationResult,
     IrregularEvent,
     apply_events,
+    apply_income_changes,
     compute_allocation,
 )
 from app.services.plan_advisor import generate_insights
+from app.services.plan_intake import extract_plan_from_text
 
 router = APIRouter(prefix="/plans", tags=["plans"])
 
@@ -123,14 +131,28 @@ def _fetch_events(plan_id: str, db: Client) -> list[dict]:
     ).data
 
 
+def _fetch_income_changes(plan_id: str, db: Client) -> list[dict]:
+    return (
+        db.table("plan_income_changes")
+        .select("*")
+        .eq("plan_id", plan_id)
+        .order("month_index")
+        .execute()
+    ).data
+
+
 def _adjusted_state(
-    plan: dict, allocations: list[dict], events: list[dict]
-) -> tuple[dict[int, dict[Category, Decimal]], dict[int, set[Category]], dict[int, Decimal]]:
-    """Base allocations + events -> the adjusted per-month view.
+    plan: dict,
+    allocations: list[dict],
+    events: list[dict],
+    income_changes: list[dict] | None = None,
+) -> tuple[dict[int, dict[Category, Decimal]], dict[int, Decimal], dict[int, set[Category]]]:
+    """Base allocations + income changes + events -> the adjusted view.
 
     plan_allocations rows are the untouched base; this overlays the
-    stored events on every read. Returns (amounts, fixed categories,
-    leftover buffer) per month_index.
+    stored income changes (first — events must see the income actually
+    available) and then events, on every read. Returns (amounts,
+    leftover buffer, fixed categories) per month_index.
     """
     horizon = plan["horizon_months"]
     income = Decimal(str(plan["monthly_income"]))
@@ -148,6 +170,19 @@ def _adjusted_state(
         i: income - monthly_savings - sum(amounts[i].values(), Decimal("0"))
         for i in range(horizon)
     }
+
+    if income_changes:
+        amounts, buffers = apply_income_changes(
+            amounts,
+            fixed,
+            buffers,
+            base_income=income,
+            monthly_savings=monthly_savings,
+            changes={
+                c["month_index"]: Decimal(str(c["monthly_amount"]))
+                for c in income_changes
+            },
+        )
 
     adjusted_amounts, leftover_buffers = apply_events(
         amounts,
@@ -168,7 +203,10 @@ def _adjusted_state(
 
 
 def _build_plan_response(
-    plan: dict, allocations: list[dict], events: list[dict]
+    plan: dict,
+    allocations: list[dict],
+    events: list[dict],
+    income_changes: list[dict] | None = None,
 ) -> PlanResponse:
     """Assemble the API view of a stored plan.
 
@@ -186,7 +224,7 @@ def _build_plan_response(
     base_variable_total = sum(r["amount"] for r in allocations if r["month_index"] == 0 and not r["is_fixed"])
     discretionary = float(income) - base_fixed_total - float(monthly_savings)
 
-    amounts, buffers, fixed = _adjusted_state(plan, allocations, events)
+    amounts, buffers, fixed = _adjusted_state(plan, allocations, events, income_changes)
 
     months = []
     for i in range(horizon):
@@ -227,7 +265,28 @@ def _build_plan_response(
         ),
         months=months,
         events=[PlanEventResponse(**e) for e in events],
+        income_changes=[IncomeChangeResponse(**c) for c in income_changes or []],
     )
+
+
+@router.post("/intake", response_model=PlanIntakeResponse)
+async def plan_intake(
+    payload: PlanIntakeRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Extract wizard fields from a plain-language description.
+
+    Returns structured fields for the client to prefill the wizard with,
+    plus follow-up questions when essentials are missing. Does NOT
+    persist anything — same parse → confirm pattern as /parse.
+    """
+    try:
+        return await extract_plan_from_text(payload.text, today=date.today())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
 
 
 @router.post("/preview", response_model=PlanPreviewResponse)
@@ -324,10 +383,75 @@ async def get_current_plan(
     user_id: str = Depends(get_current_user_id),
     db: Client = Depends(get_supabase),
 ):
-    """Return the user's plan with event-adjusted monthly allocations."""
+    """Return the user's plan with event- and income-adjusted months."""
     plan = _fetch_plan(user_id, db)
     return _build_plan_response(
-        plan, _fetch_allocations(plan["id"], db), _fetch_events(plan["id"], db)
+        plan,
+        _fetch_allocations(plan["id"], db),
+        _fetch_events(plan["id"], db),
+        _fetch_income_changes(plan["id"], db),
+    )
+
+
+@router.get("/status", response_model=PlanStatusResponse)
+async def plan_status(
+    user_id: str = Depends(get_current_user_id),
+    db: Client = Depends(get_supabase),
+):
+    """Current-month plan snapshot for the dashboard.
+
+    Compares this month's adjusted planned amounts against month-to-date
+    spending. active=False when today falls outside the plan period.
+    """
+    plan = _fetch_plan(user_id, db)
+    start = date.fromisoformat(plan["start_date"])
+    today = date.today()
+    month_index = (today.year - start.year) * 12 + (today.month - start.month)
+    if month_index < 0 or month_index >= plan["horizon_months"]:
+        return PlanStatusResponse(active=False)
+
+    amounts, buffers, fixed = _adjusted_state(
+        plan,
+        _fetch_allocations(plan["id"], db),
+        _fetch_events(plan["id"], db),
+        _fetch_income_changes(plan["id"], db),
+    )
+
+    month_start = date(today.year, today.month, 1)
+    transactions = (
+        db.table("transactions")
+        .select("category, amount")
+        .eq("user_id", user_id)
+        .eq("transaction_type", "expense")
+        .gte("date", month_start.isoformat())
+        .lt("date", _add_months(month_start, 1).isoformat())
+        .execute()
+    ).data
+    spent: dict[str, float] = {}
+    for tx in transactions:
+        spent[tx["category"]] = spent.get(tx["category"], 0.0) + tx["amount"]
+
+    categories = sorted(
+        (
+            PlanStatusCategory(
+                category=cat,
+                planned=float(amt),
+                spent=round(spent.get(cat.value, 0.0), 2),
+                remaining=round(float(amt) - spent.get(cat.value, 0.0), 2),
+                is_fixed=cat in fixed[month_index],
+            )
+            for cat, amt in amounts[month_index].items()
+            if amt > 0
+        ),
+        key=lambda c: c.remaining,  # most over / closest to the line first
+    )
+
+    return PlanStatusResponse(
+        active=True,
+        month_index=month_index,
+        days_left=(_add_months(month_start, 1) - today).days,
+        categories=categories,
+        buffer=float(buffers[month_index]),
     )
 
 
@@ -354,6 +478,7 @@ async def add_plan_event(
 
     allocations = _fetch_allocations(plan["id"], db)
     events = _fetch_events(plan["id"], db)
+    income_changes = _fetch_income_changes(plan["id"], db)
     candidate = {
         "name": payload.name,
         "category": payload.category.value,
@@ -362,14 +487,104 @@ async def add_plan_event(
         "funding": payload.funding.value,
     }
     try:
-        _adjusted_state(plan, allocations, events + [candidate])
+        _adjusted_state(plan, allocations, events + [candidate], income_changes)
     except AllocationError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         )
 
     db.table("plan_events").insert({**candidate, "plan_id": plan["id"]}).execute()
-    return _build_plan_response(plan, allocations, _fetch_events(plan["id"], db))
+    return _build_plan_response(
+        plan, allocations, _fetch_events(plan["id"], db), income_changes
+    )
+
+
+@router.post(
+    "/income-changes", response_model=PlanResponse, status_code=status.HTTP_201_CREATED
+)
+async def add_income_change(
+    payload: IncomeChangeCreate,
+    user_id: str = Depends(get_current_user_id),
+    db: Client = Depends(get_supabase),
+):
+    """Record an income change from a given month onward.
+
+    Validated before saving: every affected month must still cover its
+    fixed costs and savings (and any events must still fit). Upserts on
+    (plan_id, month_index) so re-stating a month replaces the old value.
+    """
+    plan = _fetch_plan(user_id, db)
+    if payload.month_index >= plan["horizon_months"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Change month is outside the plan period",
+        )
+
+    allocations = _fetch_allocations(plan["id"], db)
+    events = _fetch_events(plan["id"], db)
+    income_changes = _fetch_income_changes(plan["id"], db)
+    candidate = {
+        "month_index": payload.month_index,
+        "monthly_amount": float(payload.monthly_amount),
+    }
+    merged = [c for c in income_changes if c["month_index"] != payload.month_index]
+    try:
+        _adjusted_state(plan, allocations, events, merged + [candidate])
+    except AllocationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        )
+
+    db.table("plan_income_changes").upsert(
+        {**candidate, "plan_id": plan["id"]}, on_conflict="plan_id,month_index"
+    ).execute()
+    return _build_plan_response(
+        plan, allocations, events, _fetch_income_changes(plan["id"], db)
+    )
+
+
+@router.delete("/income-changes/{change_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_income_change(
+    change_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+    db: Client = Depends(get_supabase),
+):
+    """Remove an income change (ownership checked via the plan).
+
+    Removal can make a previously feasible event infeasible (e.g. a
+    raise funded a trip); that's validated too.
+    """
+    plan = _fetch_plan(user_id, db)
+    existing = (
+        db.table("plan_income_changes")
+        .select("id, month_index")
+        .eq("id", str(change_id))
+        .eq("plan_id", plan["id"])
+        .limit(1)
+        .execute()
+    )
+    if not existing.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Income change not found"
+        )
+
+    remaining = [
+        c for c in _fetch_income_changes(plan["id"], db)
+        if c["id"] != str(change_id)
+    ]
+    try:
+        _adjusted_state(
+            plan,
+            _fetch_allocations(plan["id"], db),
+            _fetch_events(plan["id"], db),
+            remaining,
+        )
+    except AllocationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Removing this change breaks the plan: {exc}",
+        )
+    db.table("plan_income_changes").delete().eq("id", str(change_id)).execute()
 
 
 @router.delete("/events/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -443,7 +658,8 @@ async def analyze_plan(
     # expense (a flight, a laptop) isn't flagged as overspending.
     allocations = _fetch_allocations(plan["id"], db)
     events = _fetch_events(plan["id"], db)
-    amounts, _, _ = _adjusted_state(plan, allocations, events)
+    income_changes = _fetch_income_changes(plan["id"], db)
+    amounts, _, _ = _adjusted_state(plan, allocations, events, income_changes)
     planned: dict[int, dict[str, float]] = {
         i: {cat.value: float(amt) for cat, amt in amounts[i].items()}
         for i in range(complete_months)
